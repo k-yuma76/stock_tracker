@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # --- 1. ページ基本設定 ---
-st.set_page_config(page_title="🇺🇸 トレンドトラッカー v6.3", layout="wide")
-st.title("🇺🇸 トレンドトラッカー v6.3 🚀")
+st.set_page_config(page_title="🇺🇸 トレンドトラッカー v6.7", layout="wide")
+st.title("🇺🇸 トレンドトラッカー v6.7 🚀")
 
 try:
     AV_API_KEY = st.secrets.get("AV_API_KEY", "")
@@ -48,7 +48,8 @@ def color_val(val):
 def safe_float(val, default=None):
     try:
         if val in [None, "", "-", "None"]: return default
-        return float(val)
+        f = float(val)
+        return f if not pd.isna(f) else default
     except: return default
 
 def format_large_number(val):
@@ -91,15 +92,20 @@ def get_comprehensive_info(t, api_key, force_update=False):
     data = {"ticker": t, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
     try:
         info = yf.Ticker(t).info
-        if info and len(info) > 10:
+        if info:
+            cp = safe_float(info.get("currentPrice"), 999999)
+            raw_f_eps = safe_float(info.get("forwardEps"))
+            # EPSが株価の半分を超える場合は異常値（株価の誤認）としてガード
+            f_eps = raw_f_eps if raw_f_eps and raw_f_eps < (cp * 0.5) else safe_float(info.get("trailingEps"))
+            
             data.update({
                 "shares": info.get("sharesOutstanding"), "eps": info.get("trailingEps"),
-                "f_eps": info.get("forwardEps"), "margin": info.get("operatingMargins"),
-                "ebitda": info.get("ebitda"), "roe": info.get("returnOnEquity"),
-                "rev_growth": info.get("revenueGrowth"), "earn_growth": info.get("earningsGrowth"),
-                "mcap_raw": info.get("marketCap"), "t_mean": info.get("targetMeanPrice"),
-                "t_high": info.get("targetHighPrice"), "t_low": info.get("targetLowPrice"),
-                "rec": info.get("recommendationKey"), "source": "Yahoo API"
+                "f_eps": f_eps, "margin": info.get("operatingMargins"),
+                "ebitda": info.get("ebitda"), "rev_growth": info.get("revenueGrowth"),
+                "earn_growth": info.get("earningsGrowth"), "mcap_raw": info.get("marketCap"),
+                "t_mean": info.get("targetMeanPrice"), "t_high": info.get("targetHighPrice"),
+                "t_low": info.get("targetLowPrice"), "rec": info.get("recommendationKey"),
+                "source": "Yahoo API"
             })
             if not force_update:
                 p_cache[t] = data
@@ -107,21 +113,22 @@ def get_comprehensive_info(t, api_key, force_update=False):
     except: pass
     return data
 
-# --- 4. サイドバー（同期管理） ---
+# --- 4. サイドバー ---
 with st.sidebar:
-    st.write("## 🛠️ データ同期管理")
+    st.write("## 🛠️ 管理機能")
     if st.button("🔄 全銘柄のデータを一括更新"):
-        with st.status("財務データを取得中...", expanded=True) as status:
-            p_cache = load_git_cache()
+        with st.status("データを一括取得中...", expanded=True) as status:
+            new_cache = {}
             for t in all_tickers:
                 st.write(f"取得中: {t}...")
-                data = get_comprehensive_info(t, AV_API_KEY, force_update=True)
-                p_cache[t] = data
-            if save_git_cache(p_cache):
+                new_cache[t] = get_comprehensive_info(t, AV_API_KEY, force_update=True)
+            if save_git_cache(new_cache):
                 status.update(label="完了！Git Pushしてください。", state="complete")
-                st.success(f"{CACHE_FILE} を更新しました。")
+    if st.button("🗑️ キャッシュ削除"):
+        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
+        st.rerun()
 
-# --- 5. メイン表示部 ---
+# --- 5. メイン表示 ---
 if themes:
     st.write("### 📅 トレンド集計期間")
     period_options = {"1日": 1, "1週": 5, "2週": 10, "1ヶ月": 30, "3ヶ月": 90}
@@ -132,10 +139,9 @@ if themes:
     def fetch_rankings(tickers, days):
         data = yf.download(tickers, period="6mo", progress=False)
         if data.empty: return pd.DataFrame()
-        target_idx = -(days + 1) if len(data) > days else 0
-        close, volume = data["Close"], data["Volume"]
-        ret = ((close.iloc[-1] - close.iloc[target_idx]) / close.iloc[target_idx]) * 100
-        vol = ((volume.iloc[-1] - volume.iloc[target_idx]) / volume.iloc[target_idx].replace(0, 1)) * 100
+        idx = -(days + 1) if len(data) > days else 0
+        ret = ((data["Close"].iloc[-1] - data["Close"].iloc[idx]) / data["Close"].iloc[idx]) * 100
+        vol = ((data["Volume"].iloc[-1] - data["Volume"].iloc[idx]) / data["Volume"].iloc[idx].replace(0, 1)) * 100
         return pd.DataFrame({"騰落率": ret, "出来高変化": vol}).dropna()
 
     results = fetch_rankings(all_tickers, days_back)
@@ -145,15 +151,12 @@ if themes:
         df_theme = pd.DataFrame(theme_summary).sort_values("平均騰落率", ascending=False)
 
         st.write("### 🏆 セクター・ランキング")
-        theme_height = int(len(df_theme) * 35.5 + 38)
+        # 【復元】高さの自動調整
+        t_h = int(len(df_theme) * 35.5 + 38)
         sel_theme = st.dataframe(
             df_theme.style.map(color_val, subset=["平均騰落率", "平均出来高変化"]),
-            column_config={
-                "テーマ": st.column_config.TextColumn("テーマ名", width="medium"),
-                "平均騰落率": st.column_config.NumberColumn("騰落率 (%)", format="%+.2f %%", width="small"),
-                "平均出来高変化": st.column_config.NumberColumn("出来高 (%)", format="%+.1f %%", width="small")
-            },
-            height=theme_height, on_select="rerun", selection_mode="single-row", hide_index=True, width="content"
+            column_config={"テーマ": st.column_config.TextColumn("テーマ名", width="medium")},
+            height=t_h, on_select="rerun", selection_mode="single-row", hide_index=True
         )
 
         if sel_theme.selection.rows:
@@ -162,77 +165,54 @@ if themes:
             t_list = [t for t in themes[t_name] if t in results.index]
             df_detail = results.loc[t_list].sort_values("騰落率", ascending=False).reset_index()
             df_detail.columns = ["銘柄", "騰落率", "出来高変化"]
-            detail_height = int(len(df_detail) * 35.5 + 38)
-            
+            # 【復元】高さの自動調整
+            d_h = int(len(df_detail) * 35.5 + 38)
             sel_stock = st.dataframe(
                 df_detail.style.map(color_val, subset=["騰落率", "出来高変化"]),
-                column_config={
-                    "銘柄": st.column_config.TextColumn("銘柄", width="small"),
-                    "騰落率": st.column_config.NumberColumn("騰落率 (%)", format="%+.2f %%", width="small"),
-                    "出来高変化": st.column_config.NumberColumn("出来高 (%)", format="%+.1f %%", width="small")
-                },
-                height=detail_height, on_select="rerun", selection_mode="single-row", hide_index=True, width="content"
+                height=d_h, on_select="rerun", selection_mode="single-row", hide_index=True
             )
 
             if sel_stock.selection.rows:
                 ticker = df_detail.iloc[sel_stock.selection.rows[0]]["銘柄"]
                 st.markdown("---")
-                st.write(f"### 📈 **{ticker}** ({JP_NAME_DICT.get(ticker, ticker)}) 詳細パネル")
+                st.write(f"### 📈 **{ticker}** ({JP_NAME_DICT.get(ticker, ticker)})")
 
-                # 【復活】チャート期間の選択肢
-                chart_col_sel, _ = st.columns([1, 2])
-                with chart_col_sel:
-                    chart_period = st.selectbox("チャート期間", ["1日", "1週間", "1ヶ月", "3ヶ月", "6ヶ月", "1年"], index=2)
-                    period_map = {
-                        "1日": ("1d", "5m"), "1週間": ("5d", "60m"), "1ヶ月": ("1mo", "1d"), 
-                        "3ヶ月": ("3mo", "1d"), "6ヶ月": ("6mo", "1d"), "1年": ("1y", "1d")
-                    }
-                    y_p, y_i = period_map[chart_period]
+                # 【復元】チャート期間選択
+                c_p = st.selectbox("チャート期間", ["1日", "1週間", "1ヶ月", "3ヶ月", "6ヶ月", "1年"], index=2)
+                p_map = {"1日": ("1d", "5m"), "1週間": ("5d", "60m"), "1ヶ月": ("1mo", "1d"), "3ヶ月": ("3mo", "1d"), "6ヶ月": ("6mo", "1d"), "1年": ("1y", "1d")}
+                y_p, y_i = p_map[c_p]
 
                 info = get_comprehensive_info(ticker, AV_API_KEY)
                 hist = yf.Ticker(ticker).history(period=y_p, interval=y_i)
-                
                 if not hist.empty:
                     col1, col2 = st.columns([2, 1])
                     curr_val = hist['Close'].iloc[-1]
                     with col1:
-                        # 【復活】以前の質感とアノテーションを備えたチャート
-                        fig = go.Figure(data=[go.Candlestick(
-                            x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'],
-                            increasing_line_color='#00C853', decreasing_line_color='#FF5252'
-                        )])
-                        
-                        # 土日や時間外の空白を埋める
+                        # 【復元】高品質チャート & アノテーション
+                        fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], increasing_line_color='#00C853', decreasing_line_color='#FF5252')])
                         breaks = [dict(bounds=["sat", "mon"])]
                         if y_i in ["5m", "60m"]: breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
                         fig.update_xaxes(rangebreaks=breaks)
-                        
-                        # 価格ラベル（高値・安値・現在値）
                         max_v, min_v = hist['High'].max(), hist['Low'].min()
-                        max_idx, min_idx = hist['High'].idxmax(), hist['Low'].idxmin()
-                        
-                        fig.add_annotation(x=max_idx, y=max_v, text=f"高値: ${max_v:.2f}", showarrow=True, arrowhead=1, ax=0, ay=-30, font=dict(color="#00C853"), bgcolor="rgba(0,0,0,0.6)")
-                        fig.add_annotation(x=min_idx, y=min_val if (min_val:=min_v) else 0, text=f"安値: ${min_v:.2f}", showarrow=True, arrowhead=1, ax=0, ay=30, font=dict(color="#FF5252"), bgcolor="rgba(0,0,0,0.6)")
-                        fig.add_annotation(x=hist.index[-1], y=curr_val, text=f"現在: ${curr_val:.2f}", showarrow=True, arrowhead=1, ax=-50, ay=0, font=dict(color="white"), bgcolor="rgba(0,0,0,0.6)")
-                        
+                        fig.add_annotation(x=hist['High'].idxmax(), y=max_v, text=f"高値: ${max_v:.2f}", showarrow=True, font=dict(color="#00C853"), bgcolor="rgba(0,0,0,0.6)")
+                        fig.add_annotation(x=hist['Low'].idxmin(), y=min_v, text=f"安値: ${min_v:.2f}", showarrow=True, font=dict(color="#FF5252"), bgcolor="rgba(0,0,0,0.6)")
+                        fig.add_annotation(x=hist.index[-1], y=curr_val, text=f"現在: ${curr_val:.2f}", showarrow=True, font=dict(color="white"), bgcolor="rgba(0,0,0,0.6)")
                         fig.update_layout(height=480, margin=dict(l=10,r=10,t=10,b=10), xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
-                    
                     with col2:
-                        st.write("#### 📊 業績 & 評価")
+                        # 【復元】詳細財務パネル
+                        st.write("#### 📊 業績 & 財務")
+                        rev_g, earn_g = safe_float(info.get("rev_growth")), safe_float(info.get("earn_growth"))
+                        if rev_g is not None and earn_g is not None:
+                            if rev_g > 0 and earn_g > 0: st.success("業績トレンド: 🔥 上向き")
+                            elif rev_g < 0 and earn_g < 0: st.error("業績トレンド: 📉 下向き")
                         st.info(f"推奨: **{format_recommendation(info.get('rec'))}**")
-                        t_mean = safe_float(info.get("t_mean"))
-                        if t_mean:
-                            st.write(f"- 目標株価(平均): `${t_mean:.2f}` ({((t_mean-curr_val)/curr_val)*100:+.1f}%)")
-                        
-                        eps, f_eps = safe_float(info.get("eps")), safe_float(info.get("f_eps"))
-                        st.write(f"- 実績 PER: {f'{(curr_val/eps):.2f}' if eps else '不可'} 倍")
-                        st.write(f"- 予想 PER: {f'{(curr_val/f_eps):.2f}' if f_eps else '不可'} 倍")
-
+                        st.write(f"- EBITDA: {format_large_number(info.get('ebitda'))}")
+                        st.write(f"- 営業利益率: {safe_float(info.get('margin'), 0)*100:.1f}%")
                         st.markdown("---")
                         st.write("#### 💰 適正株価シミュレーター")
-                        input_eps = st.number_input("予想EPS ($)", value=max(0.01, f_eps if f_eps else (eps if eps else 0.01)), step=0.1)
-                        input_per = st.number_input("ターゲットPER (倍)", value=max(1.0, (curr_val/eps) if (eps and eps>0) else 15.0), step=1.0)
+                        eps = safe_float(info.get("f_eps"), 0.01)
+                        input_eps = st.number_input("予想EPS ($)", value=max(0.01, eps), step=0.1)
+                        input_per = st.number_input("ターゲットPER", value=15.0, step=1.0)
                         fair_val = input_eps * input_per
                         st.metric("理論株価", f"${fair_val:.2f}", f"{((fair_val - curr_val) / curr_val) * 100:+.1f}%")
-                        st.caption(f"ソース: {info.get('source', '不明')} (更新: {info.get('updated_at', '-')})")
