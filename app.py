@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # --- 1. ページ基本設定 ---
-st.set_page_config(page_title="🇺🇸 トレンドトラッカー v6.2", layout="wide")
-st.title("🇺🇸 トレンドトラッカー v6.2 🚀")
+st.set_page_config(page_title="🇺🇸 トレンドトラッカー v6.3", layout="wide")
+st.title("🇺🇸 トレンドトラッカー v6.3 🚀")
 
 try:
     AV_API_KEY = st.secrets.get("AV_API_KEY", "")
@@ -27,8 +27,7 @@ JP_NAME_DICT = {
 @st.cache_data
 def load_themes_from_csv():
     csv_path = 'themes.csv'
-    if not os.path.exists(csv_path):
-        return {}, []
+    if not os.path.exists(csv_path): return {}, []
     try:
         df = pd.read_csv(csv_path)
         df.columns = df.columns.str.strip()
@@ -61,7 +60,7 @@ def format_large_number(val):
 
 def format_recommendation(rec_key):
     if not rec_key: return "データなし"
-    rec_key = rec_key.lower()
+    rec_key = str(rec_key).lower()
     if "strong_buy" in rec_key: return "🟢 強い買い"
     if "buy" in rec_key: return "🟢 買い"
     if "hold" in rec_key: return "🟡 維持"
@@ -146,9 +145,7 @@ if themes:
         df_theme = pd.DataFrame(theme_summary).sort_values("平均騰落率", ascending=False)
 
         st.write("### 🏆 セクター・ランキング")
-        # 【修正】行数に合わせて高さを自動計算
         theme_height = int(len(df_theme) * 35.5 + 38)
-        
         sel_theme = st.dataframe(
             df_theme.style.map(color_val, subset=["平均騰落率", "平均出来高変化"]),
             column_config={
@@ -165,8 +162,6 @@ if themes:
             t_list = [t for t in themes[t_name] if t in results.index]
             df_detail = results.loc[t_list].sort_values("騰落率", ascending=False).reset_index()
             df_detail.columns = ["銘柄", "騰落率", "出来高変化"]
-            
-            # 【修正】銘柄リストもスクロール不要に
             detail_height = int(len(df_detail) * 35.5 + 38)
             
             sel_stock = st.dataframe(
@@ -182,17 +177,45 @@ if themes:
             if sel_stock.selection.rows:
                 ticker = df_detail.iloc[sel_stock.selection.rows[0]]["銘柄"]
                 st.markdown("---")
-                st.write(f"### 📈 **{ticker}** ({JP_NAME_DICT.get(ticker, ticker)}) 詳細")
+                st.write(f"### 📈 **{ticker}** ({JP_NAME_DICT.get(ticker, ticker)}) 詳細パネル")
+
+                # 【復活】チャート期間の選択肢
+                chart_col_sel, _ = st.columns([1, 2])
+                with chart_col_sel:
+                    chart_period = st.selectbox("チャート期間", ["1日", "1週間", "1ヶ月", "3ヶ月", "6ヶ月", "1年"], index=2)
+                    period_map = {
+                        "1日": ("1d", "5m"), "1週間": ("5d", "60m"), "1ヶ月": ("1mo", "1d"), 
+                        "3ヶ月": ("3mo", "1d"), "6ヶ月": ("6mo", "1d"), "1年": ("1y", "1d")
+                    }
+                    y_p, y_i = period_map[chart_period]
 
                 info = get_comprehensive_info(ticker, AV_API_KEY)
-                hist = yf.Ticker(ticker).history(period="1mo")
+                hist = yf.Ticker(ticker).history(period=y_p, interval=y_i)
                 
                 if not hist.empty:
                     col1, col2 = st.columns([2, 1])
                     curr_val = hist['Close'].iloc[-1]
                     with col1:
-                        fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'])])
-                        fig.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                        # 【復活】以前の質感とアノテーションを備えたチャート
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'],
+                            increasing_line_color='#00C853', decreasing_line_color='#FF5252'
+                        )])
+                        
+                        # 土日や時間外の空白を埋める
+                        breaks = [dict(bounds=["sat", "mon"])]
+                        if y_i in ["5m", "60m"]: breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
+                        fig.update_xaxes(rangebreaks=breaks)
+                        
+                        # 価格ラベル（高値・安値・現在値）
+                        max_v, min_v = hist['High'].max(), hist['Low'].min()
+                        max_idx, min_idx = hist['High'].idxmax(), hist['Low'].idxmin()
+                        
+                        fig.add_annotation(x=max_idx, y=max_v, text=f"高値: ${max_v:.2f}", showarrow=True, arrowhead=1, ax=0, ay=-30, font=dict(color="#00C853"), bgcolor="rgba(0,0,0,0.6)")
+                        fig.add_annotation(x=min_idx, y=min_val if (min_val:=min_v) else 0, text=f"安値: ${min_v:.2f}", showarrow=True, arrowhead=1, ax=0, ay=30, font=dict(color="#FF5252"), bgcolor="rgba(0,0,0,0.6)")
+                        fig.add_annotation(x=hist.index[-1], y=curr_val, text=f"現在: ${curr_val:.2f}", showarrow=True, arrowhead=1, ax=-50, ay=0, font=dict(color="white"), bgcolor="rgba(0,0,0,0.6)")
+                        
+                        fig.update_layout(height=480, margin=dict(l=10,r=10,t=10,b=10), xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
                     
                     with col2:
@@ -200,7 +223,7 @@ if themes:
                         st.info(f"推奨: **{format_recommendation(info.get('rec'))}**")
                         t_mean = safe_float(info.get("t_mean"))
                         if t_mean:
-                            st.write(f"- 目標株価: `${t_mean:.2f}` ({((t_mean-curr_val)/curr_val)*100:+.1f}%)")
+                            st.write(f"- 目標株価(平均): `${t_mean:.2f}` ({((t_mean-curr_val)/curr_val)*100:+.1f}%)")
                         
                         eps, f_eps = safe_float(info.get("eps")), safe_float(info.get("f_eps"))
                         st.write(f"- 実績 PER: {f'{(curr_val/eps):.2f}' if eps else '不可'} 倍")
@@ -209,6 +232,7 @@ if themes:
                         st.markdown("---")
                         st.write("#### 💰 適正株価シミュレーター")
                         input_eps = st.number_input("予想EPS ($)", value=max(0.01, f_eps if f_eps else (eps if eps else 0.01)), step=0.1)
-                        input_per = st.number_input("ターゲットPER (倍)", value=15.0, step=1.0)
+                        input_per = st.number_input("ターゲットPER (倍)", value=max(1.0, (curr_val/eps) if (eps and eps>0) else 15.0), step=1.0)
                         fair_val = input_eps * input_per
                         st.metric("理論株価", f"${fair_val:.2f}", f"{((fair_val - curr_val) / curr_val) * 100:+.1f}%")
+                        st.caption(f"ソース: {info.get('source', '不明')} (更新: {info.get('updated_at', '-')})")
